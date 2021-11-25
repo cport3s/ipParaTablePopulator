@@ -1,0 +1,251 @@
+# RET DB Populator
+''' 2020-04-17: Initial release
+	2020-06-02: Updated Server IP Address
+	2020-06-08: R015 Software release update
+'''
+# ----------------------------------------------------------VARIABLES----------------------------------------------------------#
+bscserverip = '172.16.121.41'
+dbuser = 'sitedb'
+dbpassword = 'BSCAltice.123'
+# ----------------------------------------------------------FUNCTIONS----------------------------------------------------------#
+def ipparadbupdate(sitenamef, functionnamef, cpdevipf, updevipf, gwipf, vlanidf, ptpdevipf, omipf, peeripf)
+	ClearMMLBuffer()
+	# Determine the SSH connection status.
+	Print(StrfTime("%Y%m%d:%H%M%S:") + 'Connected! Populating Site ' + sitenamef)
+	query = "REPLACE INTO ippara (`sitename`, `functionname`, `cpip`, `upip`, `gwip`, `vlanid`, `ptpip`, `omip`, `peerip`) VALUES ('" + str(sitenamef) + "', '" + str(functionnamef) + "', '" + str(cpdevipf) + "', '" + str(updevipf) + "', '" + str(gwipf) + "', " + str(vlanidf) + ", '" + str(ptpdevipf) + "', '" + str(omipf) + "', '" + str(peeripf) + "');"
+	ExecuteCmd(ssh, query)
+	Print(StrfTime("%Y%m%d:%H%M%S:") + query)
+end
+
+def cpip_getter(cpbearerf)
+	# Function to get DEVIP starting with the CP Bearer ID
+	ClearMMLBuffer()
+	SendMML('DSP CPBEARER:CPBEARID=' + cpbearerf + ';')
+	sctplinkparsed = ParseMMLRpt(GetMMLReport(0))
+	# Get SCTP Link ID
+	sctplink = GetAttrValueByName(sctplinkparsed, 0, 'Link No.', 0)
+	ClearMMLBuffer()
+	SendMML('LST SCTPLNK:SCTPNO=' + sctplink + ';')
+	devipparsed = ParseMMLRpt(GetMMLReport(0))
+	# Get Local IP (DEVIP)
+	devipf = GetAttrValueByName(devipparsed, 0, 'First Local IP Address', 0)
+	# Get Peer IP Address
+	peeripf = GetAttrValueByName(devipparsed, 0, 'First Peer IP Address', 0)
+	return devipf,peeripf
+end
+
+def gw_getter(devipf)
+	# Function to get Gateway IP starting with the DEVIP
+	gwipf = ""
+	vlanidf = ""
+	ClearMMLBuffer()
+	@LST VLANMAP:;
+	vlanmapparsed = ParseMMLRpt(GetMMLReport(0))
+	gwlist = GetColumnByName(vlanmapparsed, 0, 'Next Hop IP')
+	vlanlist = GetColumnByName(vlanmapparsed, 0, 'VLAN ID')
+	for i in range(len(gwlist))
+		# Check if DEVIP and GW are on the same subnet segment
+		if checkip_segment(devipf, gwlist[i])
+			gwipf = gwlist[i]
+			vlanidf = vlanlist[i]
+		end
+	end
+	ClearMMLBuffer()
+	return gwipf,vlanidf
+end
+
+def checkip_segment(ipf, gwip)
+	# Function to determine if an IP and a GW are in the same segment. Arguments are 2 IP address and the function will return True if they are on the same segment, otherwise it'll return False.
+	segment = False
+	# Function arguments are tuples. We must convert to string to split by dot.
+	iplist = str(ipf).split('.')
+	gwiplist = str(gwip).split('.')
+	# Compare the first 3 octets of each IP Address
+	if iplist[0] == gwiplist[0] and iplist[1] == gwiplist[1] and iplist[2] == gwiplist[2]
+		segment = True
+	end
+	return segment
+end
+
+def ptp_getter(gwipf)
+	# Function to get PTP IP based on the Gateway IP. Will return an IP list.
+	ClearMMLBuffer()
+	@LST IPCLKLINK:;
+	ptpiplst = '0.0.0.0'
+	ptplinkparsed = ParseMMLRpt(GetMMLReport(0))
+	# Loop through all the reports outputed by the LST command
+	for n in range(GetRecordNum(ptplinkparsed, 0))
+		ptpip = GetAttrValueByIdx(ptplinkparsed, 0, 9, n)
+		# If the IP on the PTP Link is on the same segmente as the Gateway IP, then append it to the ptp ip list.
+		if checkip_segment(ptpip, gwipf)
+			ptpiplst = ptpip
+		end
+	end
+	return ptpiplst
+end
+
+def om_getter(gwipf)
+	# Function to check if OMCH IP is on GW segment. Function takes an IP and checks if the OMCH ip address is on the same segment. If true, it'll return the OMCH IP, otherwise it'll return NULL
+	ClearMMLBuffer()
+	omchlst = '0.0.0.0'
+	@LST OMCH:;
+	# LST OMCH contains multiple reports
+	reportList = GetAllMMLReport()
+	for report in reportList
+		omchparsed = ParseMMLRpt(report)
+		omip = GetAttrValueByName(omchparsed, 0, 'Local IP', 0)
+		if checkip_segment(omip, gwipf)
+			omchlst = omip
+		end
+	end
+	return omchlst
+end
+
+def upip_getter(devipf)
+	ClearMMLBuffer()
+	ippathipf = "0.0.0.0"
+	@LST IPPATH:;
+	ippathparsed = ParseMMLRpt(GetMMLReport(0))
+	# Get Local IP Column from the LST output
+	ippath = GetColumnByName(ippathparsed, 0, 'Local IP Address')
+	for ip in ippath
+		# Check if DEVIP and current local ip on ippath are on the same network segment
+		if checkip_segment(devipf, ip)
+			ippathipf = ip
+			break
+		end
+	end
+	return ippathipf
+end
+
+# -----------------------------------------------------------MAINCODE----------------------------------------------------------#
+# Get NE list by type
+NEList = GetNELstByType('BTS3900') + GetNELstByType('BTS5900') + GetNELstByType('BTS3900 WCDMA') + GetNELstByType('BTS3900 LTE')
+NEList.sort()
+# Open the connection
+ssh = OpenSSH(bscserverip, dbuser, dbpassword)
+if IsConnected(ssh) == True
+	Print(StrfTime("%Y%m%d:%H%M%S:") + 'ssh connection success')
+	# Connect to the DB
+	ExecuteCmd(ssh, 'mysql -u ' + dbuser + ' -p' + dbpassword + ' alticedr_sitedb')
+	# Loop through the NE list
+	for ne in NEList
+		# Check if NE is online before connecting
+		if GetNEStatus(ne) == 1
+			Print(StrfTime("%Y%m%d:%H%M%S:") + ne + ' is online')
+			# Connect to the NE on loop
+			ConnectNE(ne)
+			Print(StrfTime("%Y%m%d:%H%M%S:") + 'Connected to ' + ne)
+			# First, find ABIS Information, starting with ABISCP all the way down to DEVIP
+			@LST GBTSABISCP:;
+			abiscpparsedreport = ParseMMLRpt(GetMMLReport(0))
+			# Check if there's an ABIS interface configured
+			if GetRecordNum(abiscpparsedreport, 0) != 0
+				Print(StrfTime("%Y%m%d:%H%M%S:") + 'site has eGBTS, collecting data.')
+				cpbearer = GetAttrValueByIdx(abiscpparsedreport, 0, 1, 0)
+				# Get the CP IP & peer IP
+				gsmcpdevip,gsmpeerip = cpip_getter(cpbearer)
+				# Get the gateway for the GSM IP Segment and the VLAN ID
+				gsmgw,vlanid = gw_getter(gsmcpdevip)
+				# Now we check if the PTP IP is on the GSM DEVIP Segment
+				gsmptpdevip = ptp_getter(gsmgw)
+				# Now we check if the O&M IP is on the GSM DEVIP Segment
+				gsmomip = om_getter(gsmgw)
+				# Now we look for the UP IP
+				gsmupdevip = upip_getter(gsmcpdevip)
+				# Get GSM Function Name
+				@LST GBTSFUNCTION:;
+				gsmfunctionparsed = ParseMMLRpt(GetMMLReport(0))
+				gsmfunction = GetAttrValueByIdx(gsmfunctionparsed, 0, 0, 0)
+				# Pass all parameters to the DB proivsioning function
+				ipparadbupdate(ne, gsmfunction, gsmcpdevip, gsmupdevip, gsmgw, vlanid, gsmptpdevip, gsmomip, gsmpeerip)
+			else
+				Print(StrfTime("%Y%m%d:%H%M%S:") + 'site doesn\'t have eGBTS.')
+			end
+			ClearMMLBuffer()
+
+			# Let's check if there's an IuB Interface Configured.
+			@LST IUBCP:;
+			iubcpparsedreport = ParseMMLRpt(GetMMLReport(0))
+			# Check if there's an IuB interface configured
+			if GetRecordNum(iubcpparsedreport, 0) != 0
+				Print(StrfTime("%Y%m%d:%H%M%S:") + 'site has NodeB, collecting data.')
+				iubcpbearer = GetAttrValueByIdx(iubcpparsedreport, 0, 2, 0)
+				# Get the CP IP
+				umtscpdevip, umtspeerip = cpip_getter(iubcpbearer)
+				# Get the gateway for the UMTS IP Segment and the VLAN ID
+				umtsgw, umtsvlanid = gw_getter(umtscpdevip)
+				# Now we check if the PTP IP is on the UMTS DEVIP Segment
+				umtsptpdevip = ptp_getter(umtsgw)
+				# Now we check if the O&M IP is on the UMTS DEVIP Segment
+				umtsomip = om_getter(umtsgw)
+				# Now we look for the UP IP
+				umtsupdevip = upip_getter(umtscpdevip)
+				# Get UMTS Function Name
+				@LST NODEBFUNCTION:;
+				umtsfunctionparsed = ParseMMLRpt(GetMMLReport(0))
+				umtsfunction = GetAttrValueByIdx(umtsfunctionparsed, 0, 0, 0)
+				# Pass all parameters to the DB proivsioning function
+				ipparadbupdate(ne, umtsfunction, umtscpdevip, umtsupdevip, umtsgw, umtsvlanid, umtsptpdevip, umtsomip, umtspeerip)
+			else
+				Print(StrfTime("%Y%m%d:%H%M%S:") + 'site doesn\'t have NodeB.')
+			end
+			ClearMMLBuffer()
+
+			# Let's check if there's an S1 Interface Configured.
+			@LST S1:;
+			s1parsedreport = ParseMMLRpt(GetMMLReport(0))
+			# Check if there's an S1 interface configured
+			if GetRecordNum(s1parsedreport, 0) != 0
+				Print(StrfTime("%Y%m%d:%H%M%S:") + 'site has eNodeB, collecting data.')
+				# Get EndPoint Group ID for CP & UP
+				s1cpepgroupid = GetAttrValueByIdx(s1parsedreport, 0, 3, 0)
+				s1upepgroupid = GetAttrValueByIdx(s1parsedreport, 0, 4, 0)
+				# Get SCTP Host ID
+				SendMML('LST EPGROUP:EPGROUPID=' + s1cpepgroupid + ';')
+				sctphostidparsed = ParseMMLRpt(GetMMLReport(0))
+				sctphostid = GetAttrValueByIdx(sctphostidparsed, 0, 2, 0)
+				ClearMMLBuffer()
+				# Get User Plane Host ID
+				SendMML('LST EPGROUP:EPGROUPID=' + s1upepgroupid + ';')
+				uphostidparsed = ParseMMLRpt(GetMMLReport(0))
+				uphostid = GetAttrValueByIdx(uphostidparsed, 0, 4, 0)
+				ClearMMLBuffer()
+				# Get the CP IP
+				SendMML('LST SCTPHOST:SCTPHOSTID=' + sctphostid + ';')
+				cpipparsed = ParseMMLRpt(GetMMLReport(0))
+				ltecpdevip = GetAttrValueByIdx(cpipparsed, 0, 3, 0)
+				ltepeerip = '0.0.0.0'
+				# Get the gateway for the LTE IP Segment and the VLAN ID
+				ltegw, ltevlanid = gw_getter(ltecpdevip)
+				# Now we check if the PTP IP is on the LTE GW Segment
+				lteptpdevip = ptp_getter(ltegw)
+				# Now we check if the O&M IP is on the LTE GW Segment
+				lteomip = om_getter(ltegw)
+				# Get the UP IP
+				SendMML('LST USERPLANEHOST:UPHOSTID=' + uphostid + ';')
+				upipparsed = ParseMMLRpt(GetMMLReport(0))
+				lteupdevip = GetAttrValueByIdx(upipparsed, 0, 5, 0)
+				# Get LTE Function Name
+				@LST ENODEBFUNCTION:;
+				ltefunctionparsed = ParseMMLRpt(GetMMLReport(0))
+				ltefunction = GetAttrValueByIdx(ltefunctionparsed, 0, 0, 0)
+				# Pass all parameters to the DB proivsioning function
+				ipparadbupdate(ne, ltefunction, ltecpdevip, lteupdevip, ltegw, ltevlanid, lteptpdevip, lteomip, ltepeerip)
+			else
+				Print(StrfTime("%Y%m%d:%H%M%S:") + 'site doesn\'t have NodeB.')
+			end
+			ClearMMLBuffer()
+		# If NE is offline....
+		else
+			Print(StrfTime("%Y%m%d:%H%M%S:") + ne + " is offline.")
+		end
+	end
+# If SSH Connection failed....
+else
+	Print(StrfTime("%Y%m%d:%H%M%S:") + 'ssh connection failed')
+end
+# Close the connection.
+CloseSSH(ssh)
+Print(StrfTime("%Y%m%d:%H%M%S:") + 'ssh connection closed')
+Print("Finished!")
