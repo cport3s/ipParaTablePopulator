@@ -3,6 +3,7 @@
 	2020-06-02: Updated Server IP Address
 	2020-06-08: R015 Software release update
 	2021-11-25: Fixed OMCH data collection bug
+	2022-02-14: Implement Tx mode check (DEVIP or IPADDR4)
 '''
 # ----------------------------------------------------------VARIABLES----------------------------------------------------------#
 bscserverip = '172.16.121.41'
@@ -52,6 +53,48 @@ def gw_getter(devipf)
 		end
 	end
 	ClearMMLBuffer()
+	return gwipf,vlanidf
+end
+
+def gwGetterNew(ipaddr)
+	# Function to get Gateway IP starting with the DEVIP
+	gwipf = ""
+	vlanidf = ""
+	vlanIntId = ''
+	ClearMMLBuffer()
+	# List all IPADRR4 and check interface ID
+	@LST IPADDR4:;
+	lstIpAdrrParsed = ParseMMLRpt(GetMMLReport(0))
+	ipAdrrList = GetColumnByName(lstIpAdrrParsed, 0, 'IP Address')
+	ipInterfaceList = GetColumnByName(lstIpAdrrParsed, 0, 'Interface ID')
+	# Loop through the IP Address List
+	for i in range(len(ipAdrrList))
+		if ipAdrrList[i] == ipaddr
+			vlanIntId = ipInterfaceList[i]
+		end
+	end
+	ClearMMLBuffer()
+	# Find VLAN ID associated with IP Interface
+	@LST INTERFACE:;
+	lstInterfaceParsed = ParseMMLRpt(GetMMLReport(0))
+	interfaceIdList = GetColumnByName(lstInterfaceParsed, 0, 'Interface ID')
+	vlanIdList = GetColumnByName(lstInterfaceParsed, 0, 'VLAN ID')
+	for i in range(len(interfaceIdList))
+		if interfaceIdList[i] == str(vlanIntId)
+			vlanidf = vlanIdList[i]
+		end
+	end
+	ClearMMLBuffer()
+	# Get next hop IP list from IPROUTE4
+	@LST IPROUTE4:;
+	lstRouteParsed = ParseMMLRpt(GetMMLReport(0))
+	nextHopIpList = GetColumnByName(lstRouteParsed, 0, 'Next Hop IP')
+	for ip in nextHopIpList
+		# Check if current IP from list is on the same segment as ipaddr
+		if checkip_segment(ipaddr, ip)
+			gwipf = ip
+		end
+	end
 	return gwipf,vlanidf
 end
 
@@ -137,113 +180,229 @@ if IsConnected(ssh) == True
 			# Connect to the NE on loop
 			ConnectNE(ne)
 			Print(StrfTime("%Y%m%d:%H%M%S:") + 'Connected to ' + ne)
-			# First, find ABIS Information, starting with ABISCP all the way down to DEVIP
-			@LST GBTSABISCP:;
-			abiscpparsedreport = ParseMMLRpt(GetMMLReport(0))
-			# Check if there's an ABIS interface configured
-			if GetRecordNum(abiscpparsedreport, 0) != 0
-				Print(StrfTime("%Y%m%d:%H%M%S:") + 'site has eGBTS, collecting data.')
-				cpbearer = GetAttrValueByIdx(abiscpparsedreport, 0, 1, 0)
-				# Get the CP IP & peer IP
-				gsmcpdevip,gsmpeerip = cpip_getter(cpbearer)
-				# Get the gateway for the GSM IP Segment and the VLAN ID
-				gsmgw,vlanid = gw_getter(gsmcpdevip)
-				# Now we check if the PTP IP is on the GSM DEVIP Segment
-				gsmptpdevip = ptp_getter(gsmgw)
-				# Now we check if the O&M IP is on the GSM DEVIP Segment
-				gsmomip = om_getter(gsmgw)
-				# Now we look for the UP IP
-				gsmupdevip = upip_getter(gsmcpdevip)
-				# Get GSM Function Name
-				@LST GBTSFUNCTION:;
-				gsmfunctionparsed = ParseMMLRpt(GetMMLReport(0))
-				gsmfunction = GetAttrValueByIdx(gsmfunctionparsed, 0, 0, 0)
-				# Pass all parameters to the DB proivsioning function
-				ipparadbupdate(ne, gsmfunction, gsmcpdevip, gsmupdevip, gsmgw, vlanid, gsmptpdevip, gsmomip, gsmpeerip)
-			else
-				Print(StrfTime("%Y%m%d:%H%M%S:") + 'site doesn\'t have eGBTS.')
-			end
-			ClearMMLBuffer()
+			# Check Transmission Config Mode (DEVIP or IPADDR4)
+			@LST GTRANSPARA:;
+			gTransParaParsedReport = ParseMMLRpt(GetMMLReport(0))
+			txConfigMode = GetAttrValueByName(gTransParaParsedReport, 0, 'Transmission Configuration Mode', 0)
+			if txConfigMode == 'Old'
+				# First, find ABIS Information, starting with ABISCP all the way down to DEVIP
+				@LST GBTSABISCP:;
+				abiscpparsedreport = ParseMMLRpt(GetMMLReport(0))
+				# Check if there's an ABIS interface configured
+				if GetRecordNum(abiscpparsedreport, 0) != 0
+					Print(StrfTime("%Y%m%d:%H%M%S:") + 'site has eGBTS, collecting data.')
+					cpbearer = GetAttrValueByIdx(abiscpparsedreport, 0, 1, 0)
+					# Get the CP IP & peer IP
+					gsmcpdevip,gsmpeerip = cpip_getter(cpbearer)
+					# Get the gateway for the GSM IP Segment and the VLAN ID
+					gsmgw,vlanid = gw_getter(gsmcpdevip)
+					# Now we check if the PTP IP is on the GSM DEVIP Segment
+					gsmptpdevip = ptp_getter(gsmgw)
+					# Now we check if the O&M IP is on the GSM DEVIP Segment
+					gsmomip = om_getter(gsmgw)
+					# Now we look for the UP IP
+					gsmupdevip = upip_getter(gsmcpdevip)
+					# Get GSM Function Name
+					@LST GBTSFUNCTION:;
+					gsmfunctionparsed = ParseMMLRpt(GetMMLReport(0))
+					gsmfunction = GetAttrValueByIdx(gsmfunctionparsed, 0, 0, 0)
+					# Pass all parameters to the DB proivsioning function
+					ipparadbupdate(ne, gsmfunction, gsmcpdevip, gsmupdevip, gsmgw, vlanid, gsmptpdevip, gsmomip, gsmpeerip)
+				else
+					Print(StrfTime("%Y%m%d:%H%M%S:") + 'site doesn\'t have eGBTS.')
+				end
+				ClearMMLBuffer()
 
-			# Let's check if there's an IuB Interface Configured.
-			@LST IUBCP:;
-			iubcpparsedreport = ParseMMLRpt(GetMMLReport(0))
-			# Check if there's an IuB interface configured
-			if GetRecordNum(iubcpparsedreport, 0) != 0
-				Print(StrfTime("%Y%m%d:%H%M%S:") + 'site has NodeB, collecting data.')
-				iubcpbearer = GetAttrValueByIdx(iubcpparsedreport, 0, 2, 0)
-				# Get the CP IP
-				umtscpdevip, umtspeerip = cpip_getter(iubcpbearer)
-				# Get the gateway for the UMTS IP Segment and the VLAN ID
-				umtsgw, umtsvlanid = gw_getter(umtscpdevip)
-				# Now we check if the PTP IP is on the UMTS DEVIP Segment
-				umtsptpdevip = ptp_getter(umtsgw)
-				# Now we check if the O&M IP is on the UMTS DEVIP Segment
-				umtsomip = om_getter(umtsgw)
-				# Now we look for the UP IP
-				umtsupdevip = upip_getter(umtscpdevip)
-				# Get UMTS Function Name
-				@LST NODEBFUNCTION:;
-				umtsfunctionparsed = ParseMMLRpt(GetMMLReport(0))
-				umtsfunction = GetAttrValueByIdx(umtsfunctionparsed, 0, 0, 0)
-				# Pass all parameters to the DB proivsioning function
-				ipparadbupdate(ne, umtsfunction, umtscpdevip, umtsupdevip, umtsgw, umtsvlanid, umtsptpdevip, umtsomip, umtspeerip)
-			else
-				Print(StrfTime("%Y%m%d:%H%M%S:") + 'site doesn\'t have NodeB.')
-			end
-			ClearMMLBuffer()
+				# Let's check if there's an IuB Interface Configured.
+				@LST IUBCP:;
+				iubcpparsedreport = ParseMMLRpt(GetMMLReport(0))
+				# Check if there's an IuB interface configured
+				if GetRecordNum(iubcpparsedreport, 0) != 0
+					Print(StrfTime("%Y%m%d:%H%M%S:") + 'site has NodeB, collecting data.')
+					iubcpbearer = GetAttrValueByIdx(iubcpparsedreport, 0, 2, 0)
+					# Get the CP IP
+					umtscpdevip, umtspeerip = cpip_getter(iubcpbearer)
+					# Get the gateway for the UMTS IP Segment and the VLAN ID
+					umtsgw, umtsvlanid = gw_getter(umtscpdevip)
+					# Now we check if the PTP IP is on the UMTS DEVIP Segment
+					umtsptpdevip = ptp_getter(umtsgw)
+					# Now we check if the O&M IP is on the UMTS DEVIP Segment
+					umtsomip = om_getter(umtsgw)
+					# Now we look for the UP IP
+					umtsupdevip = upip_getter(umtscpdevip)
+					# Get UMTS Function Name
+					@LST NODEBFUNCTION:;
+					umtsfunctionparsed = ParseMMLRpt(GetMMLReport(0))
+					umtsfunction = GetAttrValueByIdx(umtsfunctionparsed, 0, 0, 0)
+					# Pass all parameters to the DB proivsioning function
+					ipparadbupdate(ne, umtsfunction, umtscpdevip, umtsupdevip, umtsgw, umtsvlanid, umtsptpdevip, umtsomip, umtspeerip)
+				else
+					Print(StrfTime("%Y%m%d:%H%M%S:") + 'site doesn\'t have NodeB.')
+				end
+				ClearMMLBuffer()
 
-			# Let's check if there's an S1 Interface Configured.
-			@LST S1:;
-			s1parsedreport = ParseMMLRpt(GetMMLReport(0))
-			# Check if there's an S1 interface configured
-			if GetRecordNum(s1parsedreport, 0) != 0
-				Print(StrfTime("%Y%m%d:%H%M%S:") + 'site has eNodeB, collecting data.')
-				# Get EndPoint Group ID for CP & UP
-				s1cpepgroupid = GetAttrValueByIdx(s1parsedreport, 0, 3, 0)
-				s1upepgroupid = GetAttrValueByIdx(s1parsedreport, 0, 4, 0)
-				# Get SCTP IDs
-				SendMML('LST EPGROUP:EPGROUPID=' + s1cpepgroupid + ';')
-				sctphostidparsed = ParseMMLRpt(GetMMLReport(0))
-				sctpHostId = GetAttrValueByName(sctphostidparsed, 0, 'SCTP Host List', 0)
-				sctpPeerId = GetAttrValueByName(sctphostidparsed, 0, 'SCTP Peer List', 0)
+				# Let's check if there's an S1 Interface Configured.
+				@LST S1:;
+				s1parsedreport = ParseMMLRpt(GetMMLReport(0))
+				# Check if there's an S1 interface configured
+				if GetRecordNum(s1parsedreport, 0) != 0
+					Print(StrfTime("%Y%m%d:%H%M%S:") + 'site has eNodeB, collecting data.')
+					# Get EndPoint Group ID for CP & UP
+					s1cpepgroupid = GetAttrValueByIdx(s1parsedreport, 0, 3, 0)
+					s1upepgroupid = GetAttrValueByIdx(s1parsedreport, 0, 4, 0)
+					# Get SCTP IDs
+					SendMML('LST EPGROUP:EPGROUPID=' + s1cpepgroupid + ';')
+					sctphostidparsed = ParseMMLRpt(GetMMLReport(0))
+					sctpHostId = GetAttrValueByName(sctphostidparsed, 0, 'SCTP Host List', 0)
+					sctpPeerId = GetAttrValueByName(sctphostidparsed, 0, 'SCTP Peer List', 0)
+					ClearMMLBuffer()
+					# Get User Plane IDs
+					SendMML('LST EPGROUP:EPGROUPID=' + s1upepgroupid + ';')
+					uphostidparsed = ParseMMLRpt(GetMMLReport(0))
+					upHostId = GetAttrValueByName(uphostidparsed, 0, 'User Plane Host List', 0)
+					upPeerId = GetAttrValueByName(uphostidparsed, 0, 'User Plane Peer List', 0)
+					ClearMMLBuffer()
+					# Get the CP IP
+					SendMML('LST SCTPHOST:SCTPHOSTID=' + sctpHostId + ';')
+					cpipparsed = ParseMMLRpt(GetMMLReport(0))
+					ltecpdevip = GetAttrValueByName(cpipparsed, 0, 'First Local IP Address', 0)
+					ClearMMLBuffer()
+					# Get the UP IP
+					ltepeerip = '0.0.0.0'
+					SendMML('LST SCTPPEER:SCTPPEERID=' + sctpPeerId + ';')
+					cpPeerIpParsed = ParseMMLRpt(GetMMLReport(0))
+					ltepeerip = GetAttrValueByName(cpipparsed, 0, 'First Peer IP Address', 0)
+					# Get the gateway for the LTE IP Segment and the VLAN ID
+					ltegw, ltevlanid = gw_getter(ltecpdevip)
+					# Now we check if the PTP IP is on the LTE GW Segment
+					lteptpdevip = ptp_getter(ltegw)
+					# Now we check if the O&M IP is on the LTE GW Segment
+					lteomip = om_getter(ltegw)
+					# Get the UP IP
+					SendMML('LST USERPLANEHOST:UPHOSTID=' + upHostId + ';')
+					upipparsed = ParseMMLRpt(GetMMLReport(0))
+					lteupdevip = GetAttrValueByIdx(upipparsed, 0, 5, 0)
+					# Get LTE Function Name
+					@LST ENODEBFUNCTION:;
+					ltefunctionparsed = ParseMMLRpt(GetMMLReport(0))
+					ltefunction = GetAttrValueByIdx(ltefunctionparsed, 0, 0, 0)
+					# Pass all parameters to the DB proivsioning function
+					ipparadbupdate(ne, ltefunction, ltecpdevip, lteupdevip, ltegw, ltevlanid, lteptpdevip, lteomip, ltepeerip)
+				else
+					Print(StrfTime("%Y%m%d:%H%M%S:") + 'site doesn\'t have NodeB.')
+				end
 				ClearMMLBuffer()
-				# Get User Plane IDs
-				SendMML('LST EPGROUP:EPGROUPID=' + s1upepgroupid + ';')
-				uphostidparsed = ParseMMLRpt(GetMMLReport(0))
-				upHostId = GetAttrValueByName(uphostidparsed, 0, 'User Plane Host List', 0)
-				upPeerId = GetAttrValueByName(uphostidparsed, 0, 'User Plane Peer List', 0)
-				ClearMMLBuffer()
-				# Get the CP IP
-				SendMML('LST SCTPHOST:SCTPHOSTID=' + sctpHostId + ';')
-				cpipparsed = ParseMMLRpt(GetMMLReport(0))
-				ltecpdevip = GetAttrValueByName(cpipparsed, 0, 'First Local IP Address', 0)
-				ClearMMLBuffer()
-				# Get the UP IP
-				ltepeerip = '0.0.0.0'
-				SendMML('LST SCTPPEER:SCTPPEERID=' + sctpPeerId + ';')
-				cpPeerIpParsed = ParseMMLRpt(GetMMLReport(0))
-				ltepeerip = GetAttrValueByName(cpipparsed, 0, 'First Peer IP Address', 0)
-				# Get the gateway for the LTE IP Segment and the VLAN ID
-				ltegw, ltevlanid = gw_getter(ltecpdevip)
-				# Now we check if the PTP IP is on the LTE GW Segment
-				lteptpdevip = ptp_getter(ltegw)
-				# Now we check if the O&M IP is on the LTE GW Segment
-				lteomip = om_getter(ltegw)
-				# Get the UP IP
-				SendMML('LST USERPLANEHOST:UPHOSTID=' + upHostId + ';')
-				upipparsed = ParseMMLRpt(GetMMLReport(0))
-				lteupdevip = GetAttrValueByIdx(upipparsed, 0, 5, 0)
-				# Get LTE Function Name
-				@LST ENODEBFUNCTION:;
-				ltefunctionparsed = ParseMMLRpt(GetMMLReport(0))
-				ltefunction = GetAttrValueByIdx(ltefunctionparsed, 0, 0, 0)
-				# Pass all parameters to the DB proivsioning function
-				ipparadbupdate(ne, ltefunction, ltecpdevip, lteupdevip, ltegw, ltevlanid, lteptpdevip, lteomip, ltepeerip)
-			else
-				Print(StrfTime("%Y%m%d:%H%M%S:") + 'site doesn\'t have NodeB.')
 			end
-			ClearMMLBuffer()
+			if txConfigMode == 'New'
+				# Get Transport Parameteres if txConfigMode is IPADDR4
+				# First, find ABIS Information, starting with ABISCP all the way down to DEVIP
+				@LST GBTSABISCP:;
+				abiscpparsedreport = ParseMMLRpt(GetMMLReport(0))
+				# Check if there's an ABIS interface configured
+				if GetRecordNum(abiscpparsedreport, 0) != 0
+					Print(StrfTime("%Y%m%d:%H%M%S:") + 'site has eGBTS, collecting data.')
+					cpbearer = GetAttrValueByIdx(abiscpparsedreport, 0, 1, 0)
+					# Get the CP IP & peer IP
+					gsmcpdevip,gsmpeerip = cpip_getter(cpbearer)
+					# Get the gateway for the GSM IP Segment and the VLAN ID
+					gsmgw,vlanid = gwGetterNew(gsmcpdevip)
+					# Now we check if the PTP IP is on the GSM DEVIP Segment
+					gsmptpdevip = ptp_getter(gsmgw)
+					# Now we check if the O&M IP is on the GSM DEVIP Segment
+					gsmomip = om_getter(gsmgw)
+					# Now we look for the UP IP
+					gsmupdevip = upip_getter(gsmcpdevip)
+					# Get GSM Function Name
+					@LST GBTSFUNCTION:;
+					gsmfunctionparsed = ParseMMLRpt(GetMMLReport(0))
+					gsmfunction = GetAttrValueByIdx(gsmfunctionparsed, 0, 0, 0)
+					# Pass all parameters to the DB proivsioning function
+					ipparadbupdate(ne, gsmfunction, gsmcpdevip, gsmupdevip, gsmgw, vlanid, gsmptpdevip, gsmomip, gsmpeerip)
+				else
+					Print(StrfTime("%Y%m%d:%H%M%S:") + 'site doesn\'t have eGBTS.')
+				end
+				ClearMMLBuffer()
+
+				# Let's check if there's an IuB Interface Configured.
+				@LST IUBCP:;
+				iubcpparsedreport = ParseMMLRpt(GetMMLReport(0))
+				# Check if there's an IuB interface configured
+				if GetRecordNum(iubcpparsedreport, 0) != 0
+					Print(StrfTime("%Y%m%d:%H%M%S:") + 'site has NodeB, collecting data.')
+					iubcpbearer = GetAttrValueByIdx(iubcpparsedreport, 0, 2, 0)
+					# Get the CP IP
+					umtscpdevip, umtspeerip = cpip_getter(iubcpbearer)
+					# Get the gateway for the UMTS IP Segment and the VLAN ID
+					umtsgw, umtsvlanid = gwGetterNew(umtscpdevip)
+					# Now we check if the PTP IP is on the UMTS DEVIP Segment
+					umtsptpdevip = ptp_getter(umtsgw)
+					# Now we check if the O&M IP is on the UMTS DEVIP Segment
+					umtsomip = om_getter(umtsgw)
+					# Now we look for the UP IP
+					umtsupdevip = upip_getter(umtscpdevip)
+					# Get UMTS Function Name
+					@LST NODEBFUNCTION:;
+					umtsfunctionparsed = ParseMMLRpt(GetMMLReport(0))
+					umtsfunction = GetAttrValueByIdx(umtsfunctionparsed, 0, 0, 0)
+					# Pass all parameters to the DB proivsioning function
+					ipparadbupdate(ne, umtsfunction, umtscpdevip, umtsupdevip, umtsgw, umtsvlanid, umtsptpdevip, umtsomip, umtspeerip)
+				else
+					Print(StrfTime("%Y%m%d:%H%M%S:") + 'site doesn\'t have NodeB.')
+				end
+				ClearMMLBuffer()
+
+				# Let's check if there's an S1 Interface Configured.
+				@LST S1:;
+				s1parsedreport = ParseMMLRpt(GetMMLReport(0))
+				# Check if there's an S1 interface configured
+				if GetRecordNum(s1parsedreport, 0) != 0
+					Print(StrfTime("%Y%m%d:%H%M%S:") + 'site has eNodeB, collecting data.')
+					# Get EndPoint Group ID for CP & UP
+					s1cpepgroupid = GetAttrValueByIdx(s1parsedreport, 0, 3, 0)
+					s1upepgroupid = GetAttrValueByIdx(s1parsedreport, 0, 4, 0)
+					# Get SCTP IDs
+					SendMML('LST EPGROUP:EPGROUPID=' + s1cpepgroupid + ';')
+					sctphostidparsed = ParseMMLRpt(GetMMLReport(0))
+					sctpHostId = GetAttrValueByName(sctphostidparsed, 0, 'SCTP Host List', 0)
+					sctpPeerId = GetAttrValueByName(sctphostidparsed, 0, 'SCTP Peer List', 0)
+					ClearMMLBuffer()
+					# Get User Plane IDs
+					SendMML('LST EPGROUP:EPGROUPID=' + s1upepgroupid + ';')
+					uphostidparsed = ParseMMLRpt(GetMMLReport(0))
+					upHostId = GetAttrValueByName(uphostidparsed, 0, 'User Plane Host List', 0)
+					upPeerId = GetAttrValueByName(uphostidparsed, 0, 'User Plane Peer List', 0)
+					ClearMMLBuffer()
+					# Get the CP IP
+					SendMML('LST SCTPHOST:SCTPHOSTID=' + sctpHostId + ';')
+					cpipparsed = ParseMMLRpt(GetMMLReport(0))
+					ltecpdevip = GetAttrValueByName(cpipparsed, 0, 'First Local IP Address', 0)
+					ClearMMLBuffer()
+					# Get the UP IP
+					ltepeerip = '0.0.0.0'
+					SendMML('LST SCTPPEER:SCTPPEERID=' + sctpPeerId + ';')
+					cpPeerIpParsed = ParseMMLRpt(GetMMLReport(0))
+					ltepeerip = GetAttrValueByName(cpipparsed, 0, 'First Peer IP Address', 0)
+					# Get the gateway for the LTE IP Segment and the VLAN ID
+					ltegw, ltevlanid = gwGetterNew(ltecpdevip)
+					# Now we check if the PTP IP is on the LTE GW Segment
+					lteptpdevip = ptp_getter(ltegw)
+					# Now we check if the O&M IP is on the LTE GW Segment
+					lteomip = om_getter(ltegw)
+					# Get the UP IP
+					SendMML('LST USERPLANEHOST:UPHOSTID=' + upHostId + ';')
+					upipparsed = ParseMMLRpt(GetMMLReport(0))
+					lteupdevip = GetAttrValueByIdx(upipparsed, 0, 5, 0)
+					# Get LTE Function Name
+					@LST ENODEBFUNCTION:;
+					ltefunctionparsed = ParseMMLRpt(GetMMLReport(0))
+					ltefunction = GetAttrValueByIdx(ltefunctionparsed, 0, 0, 0)
+					# Pass all parameters to the DB proivsioning function
+					ipparadbupdate(ne, ltefunction, ltecpdevip, lteupdevip, ltegw, ltevlanid, lteptpdevip, lteomip, ltepeerip)
+				else
+					Print(StrfTime("%Y%m%d:%H%M%S:") + 'site doesn\'t have NodeB.')
+				end
+				ClearMMLBuffer()
+			end
 		# If NE is offline....
 		else
 			Print(StrfTime("%Y%m%d:%H%M%S:") + ne + " is offline.")
